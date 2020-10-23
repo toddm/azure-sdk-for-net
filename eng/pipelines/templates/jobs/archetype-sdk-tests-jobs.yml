@@ -29,29 +29,40 @@ parameters:
 - name: CloudConfig
   type: object
   default: []
-- name: Platform
+- name: Platforms
   type: object
   default: []
 
 jobs:
   - job: 
-    condition: and(succeededOrFailed(), eq(eq(variables['Record'], 'true'), eq('${{ parameters.Platform.TestMode }}', 'Record')))
-    displayName: ${{ parameters.Platform.DisplayName }}
+    strategy:
+      maxParallel: ${{ parameters.MaxParallel }}
+      matrix:
+        ${{ each platform in parameters.Platforms }}:
+          ${{ platform.key }}:
+            PlatformKey: ${{ platform.key }}
+            OSVmImage: ${{ platform.value.OSVmImage }}
+            TestTargetFramework: ${{ platform.value.TestTargetFramework }}
+            TestMode: ${{ platform.value.TestMode }}
+
+    condition: and(succeededOrFailed(), eq(eq(variables['Record'], 'true'), eq('$(TestMode)', 'Record')))
     variables:
       - template: ../variables/globals.yml
       - name: OSVmImage
-        value: ${{ parameters.Platform.OSVmImage }}
+        value: $(OSVmImage)
 
     timeoutInMinutes: ${{ parameters.TimeoutInMinutes }}
 
     pool:
       vmImage: $(OSVmImage)
-    ${{ if parameters.Platform.Container }}:
-      container: ${{ parameters.Platform.Container }}
+    ${{ if variables['Container'] }}:
+      container: $(Container)
 
     steps:
-      - ${{ if parameters.Platform.PreSteps }}:
-        - ${{ parameters.Platform.PreSteps }}
+      # Non-string types aren't accepted as matrix variables, so select PreSteps here
+      - ${{ each platform in parameters.Platforms }}:
+        - ${{ if and(eq(platform.key, variables['PlatformKey']), platform.value.PreSteps) }}:
+          - ${{ platform.value.PreSteps }}
 
       - ${{ parameters.PreSteps }}
 
@@ -66,28 +77,27 @@ jobs:
           Location: ${{ parameters.CloudConfig.Location }}
           ServiceDirectory: '${{ parameters.ServiceDirectory }}'
           SubscriptionConfiguration: ${{ parameters.CloudConfig.SubscriptionConfiguration }}
-          ArmTemplateParameters: ${{ parameters.CloudConfig.ArmTemplateParameters }}
 
       - script: >
           dotnet test eng/service.proj
-          --framework ${{ parameters.Platform.TestTargetFramework }}
+          --framework $(TestTargetFramework)
           --filter "TestCategory!=Manually"
           --logger "trx"
           --logger:"console;verbosity=normal"
           /p:ServiceDirectory=${{ parameters.ServiceDirectory }}
           /p:IncludeSrc=false /p:IncludeSamples=false
           /p:BuildInParallel=${{ parameters.BuildInParallel }}
-          ${{ parameters.Platform.AdditionalTestArguments }}
+          $(AdditionalTestArguments)
 
-        displayName: "Build & Test (all tests for ${{ parameters.Platform.TestTargetFramework }})"
+        displayName: "Build & Test (all tests for $(TestTargetFramework))"
         env:
           DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 1
           DOTNET_CLI_TELEMETRY_OPTOUT: 1
           DOTNET_MULTILEVEL_LOOKUP: 0
-          AZURE_TEST_MODE: "${{ coalesce(parameters.Platform.TestMode, 'None') }}"
+          AZURE_TEST_MODE: "${{ coalesce(variables['TestMode'], 'None') }}"
           ${{ each var in parameters.EnvVars }}:
             ${{ var.key }}: ${{ var.value }}
-          ${{ each v in parameters.CloudConfig.EnvVars }}:
+          ${{ each v in parameters.CloudConfig.SubscriptionConfiguration.EnvironmentVariables }}:
             ${{ v.key }}: ${{ v.value }}
 
       - template: /eng/common/TestResources/remove-test-resources.yml
@@ -97,14 +107,14 @@ jobs:
 
       - task: PublishTestResults@2
         condition: always()
-        displayName: "Publish Results (${{ parameters.Platform.TestTargetFramework }})"
+        displayName: "Publish Results ($(TestTargetFramework))"
         inputs:
           testResultsFiles: "**/*.trx"
-          testRunTitle: "$(OSName) ${{ parameters.Platform.TestTargetFramework }}"
+          testRunTitle: "$(TestTargetFramework)"
           testResultsFormat: "VSTest"
           mergeTestResults: true
 
       - ${{ parameters.PostSteps }}
 
-      - ${{ if parameters.Platform.PostSteps }}:
-        - ${{ parameters.Platform.PostSteps }}
+      - ${{ if variables['PostSteps'] }}:
+        - $(PostSteps)
